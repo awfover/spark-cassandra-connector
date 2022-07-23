@@ -1,7 +1,10 @@
 import com.timushev.sbt.updates.UpdatesPlugin.autoImport.dependencyUpdatesFilter
-import sbt.Keys.parallelExecution
-import sbt.{Compile, moduleFilter, _}
+import sbt.Keys.{parallelExecution, publishLocalConfiguration}
+import sbt.{Compile, ThisBuild, moduleFilter, _}
 import sbtassembly.AssemblyPlugin.autoImport.assembly
+
+import java.io.{File, IOException}
+import java.nio.file.Files
 
 lazy val scala212 = "2.12.11"
 lazy val supportedScalaVersions = List(scala212)
@@ -28,6 +31,8 @@ Global / resolvers ++= Seq(
   DefaultMavenRepository,
   Resolver.sonatypeRepo("public")
 )
+
+val copyJars = taskKey[Unit]("Copy artifacts.")
 
 lazy val IntegrationTest = config("it") extend Test
 
@@ -109,6 +114,21 @@ lazy val connector = (project in file("connector"))
       ++ Dependencies.Jetty.dependencies,
 
     scalacOptions in (Compile, doc) ++= scalacVersionDependantOptions(scalaBinaryVersion.value)
+  )
+  .settings(
+    copyJars := {
+      val dest = (Compile / crossTarget) { _ / "jars" } .value
+      if (!dest.isDirectory && !dest.mkdirs()) {
+        throw new IOException("Failed to create jars directory.")
+      }
+
+      val jar = assembly.value
+      val destJar = new File(dest, jar.getName)
+      if (destJar.isFile) {
+        destJar.delete()
+      }
+      Files.copy(jar.toPath, destJar.toPath)
+    }
   )
   .dependsOn(
     testSupport % "test",

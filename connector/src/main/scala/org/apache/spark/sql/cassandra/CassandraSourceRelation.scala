@@ -6,10 +6,12 @@ import com.datastax.spark.connector.util._
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.security.UserGroupInformation
 import org.apache.spark.SparkConf
+import org.apache.spark.network.util.{ByteUnit, JavaUtils}
 import org.apache.spark.sql._
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.storage.StorageLevel
 
 import scala.collection.JavaConverters._
 
@@ -37,6 +39,14 @@ case class Auto(ratio: Double) extends DseSearchOptimizationSetting {
 trait CassandraTableDefProvider {
   def tableDef: TableDef
   def withSparkConfOption(key: String, value: String): BaseRelation
+}
+
+case class PersistBatchScanSetting(bounds: Seq[(Long, StorageLevel)]) {
+  def getStorageLevel(size: Long): StorageLevel = {
+    bounds
+      .collectFirst { case (bound, storageLevel) if size <= bound => storageLevel }
+      .getOrElse(StorageLevel.NONE)
+  }
 }
 
 object CassandraSourceRelation extends Logging {
@@ -134,6 +144,27 @@ object CassandraSourceRelation extends Logging {
          |"off" disables direct join even when possible
          |"auto" only does a direct join when the size ratio is satisfied see ${DirectJoinSizeRatioParam.name}
       """.stripMargin
+  )
+
+  val FixCassandraScanEqualityParam = ConfigParameter[Boolean](
+    name = "spark.cassandra.sql.fix.scan.equality",
+    section = TableOptions,
+    default = true,
+    description = "Fix the equality check of CassandraScan"
+  )
+
+  val ReuseBatchScanSettingParam = ConfigParameter[String](
+    name = "spark.cassandra.sql.execution.batchscan.reuse",
+    section = TableOptions,
+    default = "true",
+    description = ""
+  )
+
+  val PersistBatchScanSettingParam = ConfigParameter[String](
+    name = "spark.cassandra.sql.execution.batchscan.persist",
+    section = TableOptions,
+    default = "MEMORY_ONLY",
+    description = ""
   )
 
 
@@ -247,6 +278,63 @@ object CassandraSourceRelation extends Logging {
            |$invalid is not a valid ${DirectJoinSettingParam.name} value.
            |${DirectJoinSettingParam.description}""".stripMargin)
     }
+  }
+
+  def applyReuseBatchScanSetting(options: CaseInsensitiveStringMap, reuseBatchScanSetting: Boolean) : CaseInsensitiveStringMap = {
+    new CaseInsensitiveStringMap((Map(ReuseBatchScanSettingParam.name -> reuseBatchScanSetting.toString) ++ options.asScala).asJava)
+  }
+
+  def applyReuseBatchScanSetting(sparkConf: SparkConf, reuseBatchScanSetting: Boolean) : SparkConf = {
+    sparkConf.set(DirectJoinSettingParam.name, reuseBatchScanSetting.toString)
+  }
+
+  def getReuseBatchScanSetting(conf: SparkConf): Boolean = {
+    conf
+      .get(ReuseBatchScanSettingParam.name, ReuseBatchScanSettingParam.default)
+      .toLowerCase() match {
+      case "true" => true
+      case "false" => false
+      case invalid => throw new IllegalArgumentException(
+        s"""
+           |$invalid is not a valid ${ReuseBatchScanSettingParam.name} value.
+           |${ReuseBatchScanSettingParam.description}""".stripMargin)
+    }
+  }
+
+  def applyPersistBatchScanSetting(
+                                    options: CaseInsensitiveStringMap,
+                                    persistBatchScanSetting: PersistBatchScanSetting
+                                  ): CaseInsensitiveStringMap = {
+    new CaseInsensitiveStringMap(
+      (Map(PersistBatchScanSettingParam.name -> persistBatchScanSetting.toString) ++ options.asScala).asJava
+    )
+  }
+
+  def applyPersistBatchScanSetting(
+                                    sparkConf: SparkConf,
+                                    persistBatchScanSetting: PersistBatchScanSetting
+                                  ): SparkConf = {
+    sparkConf.set(PersistBatchScanSettingParam.name, persistBatchScanSetting.toString)
+  }
+
+  def getPersistBatchScanSetting(conf: SparkConf): PersistBatchScanSetting = {
+    val bounds = conf
+      .get(PersistBatchScanSettingParam.name, PersistBatchScanSettingParam.default)
+      .split(',')
+      .map(bound => bound.split(':') match {
+        case Array(bytes, storageLevel) =>
+          JavaUtils.byteStringAs(bytes, ByteUnit.BYTE) -> StorageLevel.fromString(storageLevel)
+        case Array(storageLevel) => Long.MaxValue -> StorageLevel.fromString(storageLevel)
+        case invalid => throw new IllegalArgumentException(
+          s"""
+             |${invalid.mkString(":")} is not a valid ${PersistBatchScanSettingParam.name} value.
+             |${PersistBatchScanSettingParam.description}""".stripMargin)
+      })
+    PersistBatchScanSetting(bounds)
+  }
+
+  def getFixCassandraScanEquality(conf: SparkConf): Boolean = {
+    conf.getBoolean(FixCassandraScanEqualityParam.name, FixCassandraScanEqualityParam.default)
   }
 }
 

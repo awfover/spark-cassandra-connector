@@ -10,8 +10,9 @@ import com.datastax.spark.connector.types.{InetType, UUIDType, VarIntType}
 import com.datastax.spark.connector.util.Quote.quote
 import com.datastax.spark.connector.util.{Logging, ReflectionUtil}
 import com.datastax.spark.connector.{ColumnRef, RowCountRef, TTL, WriteTime}
+import com.google.common.base.Objects
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.cassandra.CassandraSourceRelation.{AdditionalCassandraPushDownRulesParam, InClauseToJoinWithTableConversionThreshold}
+import org.apache.spark.sql.cassandra.CassandraSourceRelation.{AdditionalCassandraPushDownRulesParam, InClauseToJoinWithTableConversionThreshold, getFixCassandraScanEquality}
 import org.apache.spark.sql.cassandra.{AnalyzedPredicates, Auto, BasicCassandraPredicatePushDown, CassandraPredicateRules, CassandraSourceRelation, DsePredicateRules, DseSearchOptimizationSetting, InClausePredicateRules, Off, On, SolrConstants, SolrPredicateRules, TimeUUIDPredicateRules}
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.read.partitioning.{ClusteredDistribution, Distribution, Partitioning}
@@ -286,6 +287,8 @@ case class CassandraScan(
   with Batch
   with SupportsReportPartitioning {
 
+  private val fixEquality = getFixCassandraScanEquality(consolidatedConf)
+
 
   private lazy val inputPartitions = partitionGenerator.getInputPartitions()
   private val partitionGenerator = ScanHelper.getPartitionGenerator(
@@ -314,6 +317,27 @@ case class CassandraScan(
     s"""Cassandra Scan: ${tableDef.keyspaceName}.${tableDef.tableName}
        | - Cassandra Filters: ${cqlQueryParts.whereClause}
        | - Requested Columns: ${cqlQueryParts.selectedColumnRefs.mkString("[", ",", "]")}""".stripMargin
+  }
+
+  override def canEqual(that: Any): Boolean = that.isInstanceOf[CassandraScan]
+
+  override def equals(obj: Any): Boolean = {
+    if (fixEquality) {
+      obj match {
+        case other: CassandraScan =>
+          tableDef == other.tableDef && cqlQueryParts == other.cqlQueryParts &&
+            readSchema == other.readSchema && readConf == other.readConf
+        case _ => false
+      }
+    } else {
+      super.equals(obj)
+    }
+  }
+
+  override def hashCode(): Int = if (fixEquality) {
+    Objects.hashCode(tableDef, cqlQueryParts, readSchema, readConf)
+  } else {
+    super.hashCode()
   }
 }
 
